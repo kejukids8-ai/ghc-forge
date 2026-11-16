@@ -64,6 +64,16 @@ const TOOLS: readonly ToolSpec[] = [
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
+    name: 'get_repo',
+    description: 'Get details of one repository.',
+    inputSchema: {
+      type: 'object',
+      properties: { owner: { type: 'string' }, repo: { type: 'string' } },
+      required: ['owner', 'repo'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'list_issues',
     description: 'List issues in a repository.',
     inputSchema: {
@@ -261,6 +271,11 @@ function callTool(ctx: McpCtx, name: string, args: Record<string, unknown>): unk
       if (!created) return errorContent(`repository ${store.viewerLogin}/${str('name')} already exists`);
       return textContent(JSON.stringify({ id: created.id, name: created.name, full_name: `${created.owner}/${created.name}`, private: created.privateFlag }));
     }
+    case 'get_repo': {
+      const target = repo();
+      if (!target) return errorContent('repository not found');
+      return textContent(JSON.stringify({ id: target.id, name: target.name, full_name: `${target.owner}/${target.name}`, private: target.privateFlag, default_branch: target.defaultBranch, description: target.description }));
+    }
     case 'list_issues': {
       const target = repo();
       if (!target) return errorContent('repository not found');
@@ -405,6 +420,10 @@ export async function handleMcp(ctx: McpCtx): Promise<void> {
   const respond = (payload: JsonRpcResponse | JsonRpcResponse[]): void => {
     ctx.respondJson(200, payload);
   };
+  if (!ctx.token) {
+    ctx.respondJson(401, { message: 'Requires authentication' });
+    return;
+  }
   if (Array.isArray(parsed)) {
     const replies = parsed
       .filter((entry) => entry !== null && typeof entry === 'object')
@@ -434,9 +453,6 @@ function dispatch(ctx: McpCtx, request: RpcRequest): JsonRpcResponse | null {
   const method = String(request.method ?? '');
   const params = request.params ?? {};
   if (method.startsWith('notifications/')) return null;
-  if (!ctx.token) {
-    return errorReply(id, -32001, 'authentication required');
-  }
   if (method === 'initialize') {
     return result(id, {
       protocolVersion: PROTOCOL_REVISION,
@@ -453,6 +469,9 @@ function dispatch(ctx: McpCtx, request: RpcRequest): JsonRpcResponse | null {
   if (method === 'tools/call') {
     const name = String(params.name ?? '');
     const args = (params.arguments ?? {}) as Record<string, unknown>;
+    if (!TOOLS.some((tool) => tool.name === name)) {
+      return errorReply(id, -32602, `Unknown tool: ${name}`);
+    }
     return result(id, callTool(ctx, name, args));
   }
   return errorReply(id, -32601, `Method not found: ${method}`);
