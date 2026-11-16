@@ -62,6 +62,7 @@ function bearer(req: IncomingMessage): string | undefined {
 }
 
 interface HandlerDeps {
+  origin: string;
   readBody(): Promise<Buffer>;
   respondJson(status: number, body: unknown, extraHeaders?: Record<string, string>): void;
   respondRaw(status: number, body: Buffer | string, headers?: Record<string, string>): void;
@@ -88,7 +89,9 @@ export function createApp(): Server {
     const path = pathOf(req);
     const method = req.method ?? 'GET';
     const headers: Record<string, string> = { 'x-github-request-id': requestId() };
+    const origin = `http://${req.headers.host ?? 'localhost'}`;
     const deps: HandlerDeps = {
+      origin,
       readBody: () => readBody(req),
       respondJson: (status, body, extra) => sendJson(res, status, body, { ...headers, ...(extra ?? {}) }),
       respondRaw: (status, body, extra) => sendRaw(res, status, body, { ...headers, ...(extra ?? {}) }),
@@ -106,7 +109,7 @@ export function createApp(): Server {
 
     // The GitHub API root: a 200 with the token's scopes, as api.github.com answers GET /.
     if (method === 'GET' && (path === '/api/v3' || path === '/api/v3/')) {
-      sendJson(res, 200, { current_user_url: '/api/v3/user', rate_limit_url: '/api/v3/rate_limit' }, { 'x-oauth-scopes': 'repo, read:org' });
+      sendJson(res, 200, { current_user_url: '/api/v3/user', rate_limit_url: '/api/v3/rate_limit' }, { 'x-oauth-scopes': 'repo, read:org', ...headers });
       return;
     }
 

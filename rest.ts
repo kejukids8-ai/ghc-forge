@@ -6,6 +6,8 @@ export interface Ctx {
   store: Store;
   token: string | undefined;
   requestId: string;
+  /** e.g. http://127.0.0.1:4567 — used for absolute Link URLs */
+  origin: string;
   readBody(): Promise<Buffer>;
   respondJson(status: number, body: unknown, extraHeaders?: Record<string, string>): void;
   respondRaw(status: number, contentType: string, body: Buffer | string, extraHeaders?: Record<string, string>): void;
@@ -194,12 +196,13 @@ export function handleRest(ctx: Ctx, method: string, segments: readonly string[]
         .sort((a, b) => a.id - b.id);
       const start = (page - 1) * perPage;
       const pageItems = repos.slice(start, start + perPage);
-      const baseUrl = '/api/v3/user/repos';
+      const baseUrl = `${ctx.origin}/api/v3/user/repos`;
       const hasMore = start + perPage < repos.length;
       const headers: Record<string, string> = {};
       if (hasMore) {
         const nextUrl = `${baseUrl}?per_page=${perPage}&page=${page + 1}`;
-        headers.Link = `<${nextUrl}>; rel="next", <${baseUrl}?per_page=${perPage}&page=${Math.ceil(repos.length / perPage)}>; rel="last"`;
+        const lastUrl = `${baseUrl}?per_page=${perPage}&page=${Math.max(1, Math.ceil(repos.length / perPage))}`;
+        headers.Link = `<${nextUrl}>; rel="next", <${lastUrl}>; rel="last"`;
       }
       ctx.respondJson(200, pageItems.map((item) => repoJson(store, item)), headers);
       return true;
@@ -326,7 +329,7 @@ export function handleRest(ctx: Ctx, method: string, segments: readonly string[]
         sha: current,
         node_id: `C_${current.slice(0, 8)}`,
         commit: {
-          message: parsed.message,
+          message: parsed.message.replace(/\n+$/, ''),
           author: { name: parsed.author.split(' <')[0] ?? '', email: '', date: new Date(epoch * 1000).toISOString() },
           committer: { name: parsed.committer.split(' <')[0] ?? '', email: '', date: new Date(epoch * 1000).toISOString() },
         },
@@ -345,7 +348,7 @@ export function handleRest(ctx: Ctx, method: string, segments: readonly string[]
   // /git/refs, /git/refs/heads/{name}
   if (resource === 'git') {
     const rest2 = rest.slice(1);
-    if (rest2.length === 0) {
+    if (rest2.length === 0 || (rest2.length === 1 && rest2[0] === 'refs')) {
       if (method !== 'POST') {
         ctx.respondJson(405, errorBody('Method not allowed'));
         return true;
