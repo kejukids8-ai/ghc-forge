@@ -112,14 +112,24 @@ export class Store {
     return oid;
   }
 
-  /** Fast-forward guard: is `newOid` a descendant of `oldOid`? Unknown oldOid (unborn) is allowed. */
+  /** Fast-forward guard: is `newOid` a descendant of `oldOid`? Unknown oldOid (unborn) is allowed.
+   *  Walks commit parents only with an early exit at oldOid — never the tree closure. */
   isFastForward(repo: Repo, oldOid: string, newOid: string): boolean {
     if (oldOid === ZERO_OID) return true;
     if (!isObjectId(oldOid) || !isObjectId(newOid)) return false;
     if (oldOid === newOid) return false;
-    const lookup = (oid: string): GitObject | undefined => repo.objects.get(oid);
-    const reachable = collectReachable([newOid], lookup);
-    return reachable.has(oldOid);
+    const seen = new Set<string>();
+    const stack = [newOid];
+    while (stack.length > 0) {
+      const oid = stack.pop()!;
+      if (oid === oldOid) return true;
+      if (seen.has(oid) || !isObjectId(oid)) continue;
+      const object = repo.objects.get(oid);
+      if (!object || object.type !== 'commit') continue;
+      seen.add(oid);
+      for (const parent of parseCommit(object.data).parents) stack.push(parent);
+    }
+    return false;
   }
 
   /** Squash-merge a pull request: build the merged tree from head commit onto the base branch. */
