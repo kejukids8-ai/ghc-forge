@@ -285,15 +285,32 @@ export function readPackObjects(pack: Buffer): { objects: Map<string, { type: Gi
 
 /** Walk the zlib stream to find where the deflate data ends (zlib stream length). */
 function findDeflateEnd(pack: Buffer, start: number, limit: number): number {
-  for (let end = start + 2; end <= limit; end += 1) {
+  // Binary search with a decaying-window final pass would still re-inflate; instead inflate once with
+  // a growing window that doubles (amortized O(stream length)), then close in linearly on the last step.
+  let low = 2;
+  let end = Math.min(limit, start + 64);
+  for (;;) {
     try {
       inflateSync(pack.subarray(start, end));
-      return end - start;
+      // stream may end before `end` — trim: inflate is tolerant of trailing bytes, so bisect the tail
+      let hi = end;
+      let lo = low;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        try {
+          inflateSync(pack.subarray(start, mid));
+          hi = mid;
+        } catch {
+          lo = mid + 1;
+        }
+      }
+      return hi - start;
     } catch {
-      // not a complete stream yet
+      if (end >= limit) throw new Error('truncated deflate stream in pack');
+      low = end + 1;
+      end = Math.min(limit, end * 2);
     }
   }
-  throw new Error('truncated deflate stream in pack');
 }
 
 function applyDelta(base: Buffer, delta: Buffer): Buffer {
