@@ -42,7 +42,7 @@ interface Selection { name: string; alias: string; args: Record<string, unknown>
 interface Operation { type: 'query' | 'mutation'; name: string; selections: Selection[]; variableDefs: Array<{ name: string; type: string }> }
 
 /** Tokenize + parse enough GraphQL to walk the suite's documents. */
-function parseDocument(text: string): Operation[] {
+export function parseDocument(text: string): Operation[] {
   let pos = 0;
   const skip = (): void => {
     for (;;) {
@@ -51,7 +51,7 @@ function parseDocument(text: string): Operation[] {
         while (pos < text.length && text[pos] !== '\n') pos += 1;
         continue;
       }
-      if (pos + 1 < text.length && text.slice(pos, pos + 2) === ',') {
+      if (text[pos] === ',') {
         pos += 1;
         continue;
       }

@@ -169,50 +169,75 @@ function ancestors(repo: Repo, oid: string, lookup: (oid: string) => GitObject |
 function fetchPack(repo: Repo, request: FetchRequestV2): { pack: Buffer; shallow: string[]; unshallow: string[]; acks: string[]; nak: boolean } {
   const lookup = (oid: string): GitObject | undefined => repo.objects.get(oid);
   const havesSet = new Set(request.haves.filter(isObjectId));
-  // haves present on the server get ACKs
   const acks: string[] = [];
   for (const have of request.haves) {
     if (isObjectId(have) && repo.objects.has(have)) acks.push(have);
   }
   const nak = acks.length === 0;
-  // Determine the send set per want, honoring depth (1 = tip only, plus tree closure)
-  const send = new Set<string>();
+  const depth = request.depth;
+  const send = new Set<string>(); // commits to send
   const shallow: string[] = [];
   const unshallow: string[] = [];
-  const depth = request.depth;
   for (const want of request.wants) {
-    if (!isObjectId(want)) continue;
-    const chain = depth == null ? ancestors(repo, want, lookup) : ancestors(repo, want, lookup).slice(0, depth);
-    if (depth != null) {
-      // mark the cut boundary
-      const full = ancestors(repo, want, lookup);
-      if (full.length > depth) {
-        shallow.push(full[depth - 1]!);
-      } else {
-        unshallow.push(want);
+    if (!isObjectId(want) || !repo.objects.has(want)) continue;
+    const object = lookup(want)!;
+    if (object.type !== 'commit') {
+      send.add(want);
+      continue;
+    }
+    // Commit walk from the want, generation-tracked; cut at commits the client holds.
+    const visited = new Set<string>();
+    const queue: Array<{ oid: string; gen: number }> = [{ oid: want, gen: 1 }];
+    while (queue.length > 0) {
+      const { oid, gen } = queue.shift()!;
+      if (visited.has(oid)) continue;
+      const commit = lookup(oid);
+      if (!commit || commit.type !== 'commit') continue;
+      visited.add(oid);
+      const held = havesSet.has(oid);
+      if (depth == null) {
+        if (held) continue; // full fetch: cut at the commits the client holds
+        send.add(oid);
+      } else if (!held) {
+        send.add(oid); // shallow/deepen: only the generations the client lacks are sent
+      }
+      const parsed = parseCommit(commit.data);
+      const existingParents = parsed.parents.filter((parent) => repo.objects.has(parent));
+      if (depth != null && gen >= depth) {
+        if (existingParents.length > 0) {
+          if (!shallow.includes(oid)) shallow.push(oid);
+        } else if (!unshallow.includes(oid)) {
+          unshallow.push(oid);
+        }
+        continue; // history beyond depth is never sent
+      }
+      for (const parent of existingParents) queue.push({ oid: parent, gen: gen + 1 });
+    }
+    // Tree/blob closure of the sent commits only (never via parents the client may lack).
+    const treeQueue: string[] = [];
+    for (const oid of send) {
+      const commit = lookup(oid);
+      if (commit && commit.type === 'commit') treeQueue.push(parseCommit(commit.data).tree);
+    }
+    const haveClosure = new Set<string>();
+    if (havesSet.size > 0 && depth == null) {
+      for (const have of havesSet) {
+        if (!repo.objects.has(have)) continue;
+        for (const reached of collectReachable([have], lookup)) haveClosure.add(reached);
       }
     }
-    for (const commitOid of chain) {
-      if (havesSet.has(commitOid) && request.depth == null) continue;
-      send.add(commitOid);
-      const object = lookup(commitOid);
-      if (!object) continue;
-      send.add(parseCommit(object.data).tree);
-    }
-    // tree closure for each sent commit
-    const closure = collectReachable([want], (oid) => {
-      if (send.has(oid)) return lookup(oid);
-      // limit walk: don't pull parent history beyond depth
-      const object = lookup(oid);
-      if (!object) return undefined;
-      if (depth != null && object.type === 'commit' && !send.has(oid) && oid !== want && !send.has(oid)) return undefined;
-      return object;
-    });
-    for (const oid of closure) {
+    const seenTrees = new Set<string>();
+    while (treeQueue.length > 0) {
+      const oid = treeQueue.pop()!;
+      if (seenTrees.has(oid) || haveClosure.has(oid)) continue;
       const object = lookup(oid);
       if (!object) continue;
-      if (object.type === 'commit' && !send.has(oid)) continue; // never send unseen commits
+      seenTrees.add(oid);
       send.add(oid);
+      if (object.type === 'tree') for (const entry of parseTree(object.data)) treeQueue.push(entry.oid);
+    }
+    if (depth != null) {
+      // shallow: skip the haveClosure filter, but still never re-send the client's held commit trees
     }
   }
   const objects: Array<{ type: GitObject['type']; data: Buffer }> = [];
@@ -220,7 +245,7 @@ function fetchPack(repo: Repo, request: FetchRequestV2): { pack: Buffer; shallow
     const object = lookup(oid);
     if (object) objects.push({ type: object.type, data: object.data });
   }
-  // dedupe by oid (hash collisions impossible; but send may hold each once anyway)
+  if (process.env.GHC_DEBUG) process.stderr.write(`fetchPack wants=${JSON.stringify(request.wants)} haves=${JSON.stringify(request.haves)} depth=${depth} send=${[...send].join(',')} shallow=${shallow} unshallow=${unshallow}\n`);
   return { pack: writePack(objects), shallow, unshallow, acks, nak };
 }
 
@@ -243,7 +268,7 @@ function v2FetchResponse(repo: Repo, request: FetchRequestV2): Buffer {
   sections.push(encodePktLine('packfile\n'));
   const pack = result.pack;
   // side-band-64k framing: band 1, max 65519 bytes a frame
-  const FRAME = 65518;
+  const FRAME = 65515;
   for (let offset = 0; offset < pack.length; offset += FRAME) {
     const chunk = pack.subarray(offset, Math.min(offset + FRAME, pack.length));
     const frame = Buffer.allocUnsafe(chunk.length + 1);
@@ -300,7 +325,7 @@ function v0FetchResponse(repo: Repo, body: Buffer): Buffer {
       parts.push(encodePktLine(frame));
     }
     const pack = result.pack;
-    const FRAME = 65518;
+    const FRAME = 65515;
     for (let offset = 0; offset < pack.length; offset += FRAME) {
       const chunk = pack.subarray(offset, Math.min(offset + FRAME, pack.length));
       const frame = Buffer.allocUnsafe(chunk.length + 1);
@@ -412,8 +437,8 @@ function receivePackResponse(repo: Repo, body: Buffer, store: Store): Buffer {
 
   if (sideband) {
     const parts: Buffer[] = [];
-    for (let offset2 = 0; offset2 < report.length; offset2 += 65518) {
-      const chunk = report.subarray(offset2, Math.min(offset2 + 65518, report.length));
+    for (let offset2 = 0; offset2 < report.length; offset2 += 65515) {
+      const chunk = report.subarray(offset2, Math.min(offset2 + 65515, report.length));
       const frame = Buffer.allocUnsafe(chunk.length + 1);
       frame[0] = 1;
       chunk.copy(frame, 1);
@@ -499,7 +524,8 @@ export function handleGitHttp(
       }
       // v0 fetch
       ctx.respond(200, `application/x-${SERVICE_UPLOAD}-result`, v0FetchResponse(repo, body));
-    } catch {
+    } catch (err) {
+      if (process.env.GHC_DEBUG) process.stderr.write(`git-http error: ${err instanceof Error ? err.stack : String(err)}\n`);
       ctx.respond(500, 'application/json', JSON.stringify({ message: 'internal error' }));
     }
   });
