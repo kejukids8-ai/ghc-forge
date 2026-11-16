@@ -162,7 +162,7 @@ export function parseDocument(text: string): Operation[] {
       }
       if (eat('...')) {
         skip();
-        if (text[pos] === 'o' && text.slice(pos, pos + 2) === 'on') {
+        if (text.slice(pos, pos + 2) === 'on') {
           pos += 2;
           const on = readName();
           out.push({ name: '', alias: '', args: {}, selections: readSelections(), fragmentOn: on });
@@ -191,18 +191,9 @@ export function parseDocument(text: string): Operation[] {
         break;
       }
       let sub: Selection[] = [];
-      let fragmentOn: string | undefined;
       skip();
       if (text[pos] === '{') sub = readSelections();
-      else if (eat('...')) {
-        skip();
-        if (text.slice(pos, pos + 2) === 'on') {
-          pos += 2;
-          fragmentOn = readName();
-          sub = readSelections();
-        }
-      }
-      out.push({ name, alias, args, selections: sub, fragmentOn });
+      out.push({ name, alias, args, selections: sub, fragmentOn: undefined });
     }
     return out;
   };
@@ -287,7 +278,7 @@ function repositoryObject(ctx: GqlCtx, repo: Repo): Json {
     databaseId: repo.id,
     name: repo.name,
     nameWithOwner: `${repo.owner}/${repo.name}`,
-    owner: { login: repo.owner },
+    owner: { __kind: 'RepositoryOwner', login: repo.owner },
     defaultBranchRef: repo.refs.has(`refs/heads/${repo.defaultBranch}`) ? { name: repo.defaultBranch } : null,
     viewerPermission: 'ADMIN',
     hasIssuesEnabled: true,
@@ -308,7 +299,7 @@ function issueObject(issue: Issue): Json {
     createdAt: issue.createdAt,
     updatedAt: issue.closedAt ?? issue.createdAt,
     closedAt: issue.closedAt,
-    author: { login: issue.user },
+    author: { __kind: 'RepositoryOwner', login: issue.user },
     labels: { nodes: issue.labels.map((name) => ({ name, color: 'ededed' })) },
     url: '',
   };
@@ -326,7 +317,7 @@ function pullObject(pull: Pull): Json {
     baseRefName: pull.base,
     mergeable: 'MERGEABLE',
     createdAt: pull.createdAt,
-    author: { login: pull.user },
+    author: { __kind: 'RepositoryOwner', login: pull.user },
     url: '',
   };
 }
@@ -516,6 +507,41 @@ function fieldHandler(ctx: GqlCtx, scope: unknown, field: string, args: Readonly
     case 'RepositoryOwner':
       if (field === 'login') return scalar(node.login);
       break;
+    case 'Comment':
+      if (field === '__typename') return 'Comment';
+      if (field === 'id') return scalar(node.id);
+      if (field === 'body') return scalar(node.body);
+      break;
+    case 'MutationPayload':
+      if (field in node) {
+        const value = (node as Json)[field];
+        return sub(value === null ? null : (typeof value === 'object' && value !== null && !Array.isArray(value) ? { __kind: 'MutationPayload', ...value as Json } : value));
+      }
+      errors.push(`Field '${field}' does not exist on type 'MutationPayload'.`);
+      return null;
+    case '__Type':
+      if (field === '__typename') return '__Type';
+      if (field === 'name') return scalar(node.name);
+      if (field === 'kind') return scalar(node.kind);
+      if (field === 'fields') return sub(node.fields);
+      if (field === 'enumValues') return sub(node.enumValues);
+      if (field === 'inputFields') return sub(node.inputFields);
+      break;
+    case '__Field':
+      if (field === 'name') return scalar(node.name);
+      break;
+    case '__EnumValue':
+      if (field === 'name') return scalar(node.name);
+      break;
+    case '__Schema':
+      if (field === 'queryType') return sub(node.queryType);
+      if (field === 'mutationType') return sub(node.mutationType);
+      if (field === 'types') return sub(node.types);
+      break;
+  }
+  if (kind === undefined && typeof node === 'object' && node !== null) {
+    // plain JSON passthrough
+    if (field in node) return scalar((node as Json)[field]);
   }
   errors.push(`Field '${field}' does not exist on type '${kind === 'Repository' ? 'Repository' : kind}'.`);
   return null;
@@ -572,7 +598,7 @@ function mutationField(ctx: GqlCtx, field: string, args: Readonly<Record<string,
     if (!repo) return respond(null);
     const result = store.createIssue(repo, String(input.title ?? ''), typeof input.body === 'string' ? input.body : '', [], store.viewerLogin);
     if ('error' in result) return respond(null);
-    return respond({ createIssue: { __kind: 'IssueEdge', issue: { __kind: 'Issue', ...issueObject(result.issue) } } });
+    return respond({ issue: { __kind: 'Issue', ...issueObject(result.issue) } });
   }
   if (field === 'closeIssue') {
     const decoded = decodeGlobalId(String(input.issueId ?? ''));
@@ -582,7 +608,7 @@ function mutationField(ctx: GqlCtx, field: string, args: Readonly<Record<string,
       if (issue) {
         issue.state = 'closed';
         issue.closedAt = issue.createdAt;
-        return respond({ closeIssue: { issue: { __kind: 'Issue', ...issueObject(issue) } } });
+        return respond({ issue: { __kind: 'Issue', ...issueObject(issue) } });
       }
     }
     return respond(null);
@@ -594,7 +620,7 @@ function mutationField(ctx: GqlCtx, field: string, args: Readonly<Record<string,
     const base = String(input.baseRefName ?? '');
     const result = store.createPull(repo, { head, base, title: String(input.title ?? ''), body: typeof input.body === 'string' ? input.body : '' }, store.viewerLogin);
     if ('error' in result) return respond(null);
-    return respond({ createPullRequest: { pullRequest: { __kind: 'PullRequest', ...pullObject(result.pull) } } });
+    return respond({ pullRequest: { __kind: 'PullRequest', ...pullObject(result.pull) } });
   }
   if (field === 'mergePullRequest') {
     const decoded = decodeGlobalId(String(input.pullRequestId ?? ''));
@@ -604,7 +630,7 @@ function mutationField(ctx: GqlCtx, field: string, args: Readonly<Record<string,
       if (pull) {
         const sha = store.mergePull(repo, pull);
         if (sha === null) return respond(null);
-        return respond({ mergePullRequest: { pullRequest: { __kind: 'PullRequest', ...pullObject(pull) } } });
+        return respond({ pullRequest: { __kind: 'PullRequest', ...pullObject(pull) } });
       }
     }
     return respond(null);
@@ -618,7 +644,7 @@ function mutationField(ctx: GqlCtx, field: string, args: Readonly<Record<string,
       if (issue) {
         const comment = { id: ++repo.commentCounter, body, createdAt: issue.createdAt };
         issue.comments.push(comment);
-        return respond({ addComment: { commentEdge: { node: { __kind: 'Comment', id: globalId('issue-comment', comment.id), body } } } });
+        return respond({ commentEdge: { node: { __kind: 'Comment', id: globalId('issue-comment', comment.id), body } } });
       }
     }
     return respond(null);
