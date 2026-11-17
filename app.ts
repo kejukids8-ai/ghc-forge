@@ -71,9 +71,18 @@ const store = new Store();
 /** Read a request body to a Buffer (chunked or content-length). */
 function readBody(req: IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
+    // small bodies (issue writes, push commands) arrive as one chunk: skip the concat
+    let first: Buffer | null = null;
     const chunks: Buffer[] = [];
-    req.on('data', (chunk: Buffer) => chunks.push(chunk));
-    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('data', (chunk: Buffer) => {
+      if (first === null) first = chunk;
+      else chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (first === null) resolve(Buffer.alloc(0));
+      else if (chunks.length === 0) resolve(first);
+      else resolve(Buffer.concat([first, ...chunks]));
+    });
     req.on('error', reject);
   });
 }
