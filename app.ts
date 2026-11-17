@@ -105,9 +105,13 @@ interface HandlerDeps {
 }
 
 function sendRaw(res: ServerResponse, status: number, body: Buffer | string, headers: Readonly<Record<string, string>> = {}): void {
-  const payload = Buffer.isBuffer(body) ? body : Buffer.from(body, 'utf8');
-  res.writeHead(status, { 'content-length': payload.length, ...headers });
-  res.end(payload);
+  if (typeof body === 'string') {
+    res.writeHead(status, { 'content-length': Buffer.byteLength(body), ...headers });
+    res.end(body);
+    return;
+  }
+  res.writeHead(status, { 'content-length': body.length, ...headers });
+  res.end(body);
 }
 
 function sendEmpty(res: ServerResponse, status: number, headers: Readonly<Record<string, string>> = {}): void {

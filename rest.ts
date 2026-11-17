@@ -59,6 +59,7 @@ const issueTextCache = new WeakMap<Issue, string>();
 export function invalidateIssueJson(issue: Issue): void {
   issueJsonCache.delete(issue);
   issueTextCache.delete(issue);
+  issueBodyCache.delete(issue);
 }
 
 /** The GET /issues/{number} response text, memoized per issue until invalidated. */
@@ -68,6 +69,16 @@ function issueText(issue: Issue): string {
   const text = `${JSON.stringify(issueJson(issue))}\n`;
   issueTextCache.set(issue, text);
   return text;
+}
+
+/** The same body pre-encoded as a Buffer, so the hot GET never re-encodes. */
+const issueBodyCache = new WeakMap<Issue, Buffer>();
+function issueBody(issue: Issue): Buffer {
+  const cached = issueBodyCache.get(issue);
+  if (cached) return cached;
+  const body = Buffer.from(issueText(issue), 'utf8');
+  issueBodyCache.set(issue, body);
+  return body;
 }
 
 function buildIssueJson(issue: Issue): Record<string, unknown> {
@@ -685,7 +696,7 @@ export function handleRest(ctx: Ctx, method: string, segments: readonly string[]
     }
     if (rest.length === 2) {
       if (method === 'GET') {
-        ctx.respondRaw(200, 'application/json; charset=utf-8', issueText(issue));
+        ctx.respondRaw(200, 'application/json; charset=utf-8', issueBody(issue));
         return true;
       }
       if (method === 'PATCH') {
