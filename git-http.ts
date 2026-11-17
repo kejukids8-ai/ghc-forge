@@ -2,7 +2,7 @@
 // v0 upload-pack fallback, v0 receive-pack with report-status + side-band-64k + delete-refs.
 import {
   ZERO_OID, encodePktLines, decodePktLines, encodePktLine, PKT_FLUSH, PKT_DELIM,
-  writePack, readPackObjects, parseCommit, parseTree, collectReachable, isObjectId,
+  writePack, readPackObjects, parseCommit, parseTree, isObjectId,
 } from './git-core.ts';
 import type { Store, Repo, GitObject } from './store.ts';
 
@@ -219,11 +219,21 @@ function fetchPack(repo: Repo, request: FetchRequestV2): { pack: Buffer; shallow
       const commit = lookup(oid);
       if (commit && commit.type === 'commit') treeQueue.push(parseCommit(commit.data).tree);
     }
+    // The client's held commits' tree/blob closure: objects under them must not be re-sent.
     const haveClosure = new Set<string>();
     if (havesSet.size > 0 && depth == null) {
       for (const have of havesSet) {
-        if (!repo.objects.has(have)) continue;
-        for (const reached of collectReachable([have], lookup)) haveClosure.add(reached);
+        const held = lookup(have);
+        if (!held || held.type !== 'commit') continue;
+        const tree = parseCommit(held.data).tree;
+        const stack = [tree];
+        while (stack.length > 0) {
+          const oid = stack.pop()!;
+          if (haveClosure.has(oid)) continue;
+          haveClosure.add(oid);
+          const object = lookup(oid);
+          if (object && object.type === 'tree') for (const entry of parseTree(object.data)) stack.push(entry.oid);
+        }
       }
     }
     const seenTrees = new Set<string>();
