@@ -401,20 +401,29 @@ function v0FetchResponse(repo: Repo, body: Buffer): Buffer {
 // ---------------------------------------------------------------- receive-pack
 
 function receivePackResponse(repo: Repo, body: Buffer, store: Store): Buffer {
-  const packets = decodePktLines(body);
   interface Command { oldOid: string; newOid: string; ref: string }
   const commands: Command[] = [];
   let capabilities = '';
   let packBytes: Buffer | null = null;
-  let section = 0;
-  for (const packet of packets) {
-    if (packet.kind === 'flush') {
-      section += 1;
-      continue;
+  // one pass: the command section is pkt-framed; the packfile follows the first flush as raw bytes
+  let offset = 0;
+  let sawFlush = false;
+  while (offset + 4 <= body.length) {
+    let length = 0;
+    for (let i = 0; i < 4; i += 1) {
+      const byte = body[offset + i]!;
+      if (byte < 0x30 || byte > 0x66) { length = -1; break; }
+      const nibble = byte <= 0x39 ? byte - 0x30 : (byte & 0xdf) - 0x37;
+      if (nibble < 0 || nibble > 15) { length = -1; break; }
+      length = (length << 4) | nibble;
     }
-    if (packet.kind !== 'data') continue;
-    if (section === 0) {
-      let line = packet.payload.toString('utf8').replace(/\n$/, '');
+    if (length <= 0) {
+      if (length === 0) { offset += 4; sawFlush = true; continue; }
+      break;
+    }
+    if (offset + length > body.length) break;
+    if (!sawFlush) {
+      let line = body.subarray(offset + 4, offset + length).toString('utf8').replace(/\n$/, '');
       const nul = line.indexOf('\0');
       if (nul >= 0) {
         capabilities = line.slice(nul + 1);
@@ -424,26 +433,10 @@ function receivePackResponse(repo: Repo, body: Buffer, store: Store): Buffer {
       if (parts.length >= 3 && isObjectId(parts[0]) && isObjectId(parts[1])) {
         commands.push({ oldOid: parts[0], newOid: parts[1], ref: parts.slice(2).join(' ') });
       }
-    } else if (section === 1) {
-      // the packfile follows the flush directly as raw bytes (not pkt-framed)
-      packBytes = null;
-      break;
     }
-  }
-  // The packfile is the raw bytes after the command flush
-  let offset = 0;
-  while (offset + 4 <= body.length) {
-    const hex = body.subarray(offset, offset + 4).toString('ascii');
-    if (!/^[0-9a-fA-F]{4}$/.test(hex)) break;
-    const length = parseInt(hex, 16);
-    if (length === 0) {
-      offset += 4;
-      continue;
-    }
-    if (length < 4 || offset + length > body.length) break;
     offset += length;
   }
-  if (offset < body.length) packBytes = body.subarray(offset);
+  if (sawFlush && offset < body.length) packBytes = body.subarray(offset);
 
   // unpack
   let unpackOk = true;
