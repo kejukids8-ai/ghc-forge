@@ -1,7 +1,10 @@
 // git-core.ts: SHA-1 object hashing, tree/commit/tag build+parse, pkt-line codec, packfile read+write.
 // Pure functions over Buffers, node built-ins only. The server side of the smart-HTTP protocol.
 import { createHash } from 'node:crypto';
-import { inflateSync, deflateSync } from 'node:zlib';
+import { inflateSync, deflateSync, Inflate as ZlibInflate, constants as ZlibConstants } from 'node:zlib';
+
+const Inflate = ZlibInflate as unknown as new () => ZlibInflate & { bytesRead: number; _processChunk(buf: Buffer, finish: number): Buffer };
+const Z_FINISH = ZlibConstants.Z_FINISH;
 
 export type GitObjectType = 'commit' | 'tree' | 'blob' | 'tag';
 export const ZERO_OID = '0'.repeat(40);
@@ -240,10 +243,21 @@ export function readPackObjects(pack: Buffer): { objects: Map<string, { type: Gi
     } else if (header.type < 1 || header.type > 4) {
       throw new Error(`bad pack entry type ${header.type}`);
     }
-    // inflate from offset; zlib stream ends where it ends
-    const inflated = inflateSync(pack.subarray(offset, trailerStart));
+    // inflate exactly the deflate stream: a single Inflate._processChunk pass reports
+    // bytes consumed via bytesRead, no binary search over re-inflations
+    const inflator = new Inflate();
+    let inflated: Buffer;
+    let consumed: number;
+    try {
+      inflated = inflator._processChunk(pack.subarray(offset, trailerStart), Z_FINISH) as Buffer;
+      consumed = inflator.bytesRead;
+    } catch {
+      inflator.close();
+      throw new Error('truncated deflate stream in pack');
+    }
+    inflator.close();
     entry.data = inflated;
-    offset += inflated.length ? findDeflateEnd(pack, offset, trailerStart) : 0;
+    offset += consumed;
     byOffset.set(entryOffset, entry);
     order.push(entryOffset);
   }
@@ -281,36 +295,6 @@ export function readPackObjects(pack: Buffer): { objects: Map<string, { type: Gi
     objects.set(hashObject(object.type, object.data), object);
   }
   return { objects, count: declared };
-}
-
-/** Walk the zlib stream to find where the deflate data ends (zlib stream length). */
-function findDeflateEnd(pack: Buffer, start: number, limit: number): number {
-  // Binary search with a decaying-window final pass would still re-inflate; instead inflate once with
-  // a growing window that doubles (amortized O(stream length)), then close in linearly on the last step.
-  let low = 2;
-  let end = Math.min(limit, start + 64);
-  for (;;) {
-    try {
-      inflateSync(pack.subarray(start, end));
-      // stream may end before `end` — trim: inflate is tolerant of trailing bytes, so bisect the tail
-      let hi = end;
-      let lo = low;
-      while (lo < hi) {
-        const mid = (lo + hi) >> 1;
-        try {
-          inflateSync(pack.subarray(start, mid));
-          hi = mid;
-        } catch {
-          lo = mid + 1;
-        }
-      }
-      return hi - start;
-    } catch {
-      if (end >= limit) throw new Error('truncated deflate stream in pack');
-      low = end + 1;
-      end = Math.min(limit, end * 2);
-    }
-  }
 }
 
 function applyDelta(base: Buffer, delta: Buffer): Buffer {
