@@ -1,10 +1,7 @@
 // git-core.ts: SHA-1 object hashing, tree/commit/tag build+parse, pkt-line codec, packfile read+write.
 // Pure functions over Buffers, node built-ins only. The server side of the smart-HTTP protocol.
 import { createHash } from 'node:crypto';
-import { inflateSync, deflateSync, Inflate as ZlibInflate, constants as ZlibConstants } from 'node:zlib';
-
-const Inflate = ZlibInflate as unknown as new () => ZlibInflate & { bytesRead: number; _processChunk(buf: Buffer, finish: number): Buffer };
-const Z_FINISH = ZlibConstants.Z_FINISH;
+import { inflateSync, deflateSync } from 'node:zlib';
 
 export type GitObjectType = 'commit' | 'tree' | 'blob' | 'tag';
 export const ZERO_OID = '0'.repeat(40);
@@ -243,19 +240,17 @@ export function readPackObjects(pack: Buffer): { objects: Map<string, { type: Gi
     } else if (header.type < 1 || header.type > 4) {
       throw new Error(`bad pack entry type ${header.type}`);
     }
-    // inflate exactly the deflate stream: a single Inflate._processChunk pass reports
-    // bytes consumed via bytesRead, no binary search over re-inflations
-    const inflator = new Inflate();
+    // inflateSync({info:true}) reports the engine's bytesRead: the exact zlib stream length
+    // in one pass, no binary search over re-inflations
     let inflated: Buffer;
     let consumed: number;
     try {
-      inflated = inflator._processChunk(pack.subarray(offset, trailerStart), Z_FINISH) as Buffer;
-      consumed = inflator.bytesRead;
+      const info = inflateSync(pack.subarray(offset, trailerStart), { info: true }) as { buffer: Buffer; engine: { bytesRead: number } };
+      inflated = info.buffer;
+      consumed = info.engine.bytesRead;
     } catch {
-      inflator.close();
       throw new Error('truncated deflate stream in pack');
     }
-    inflator.close();
     entry.data = inflated;
     offset += consumed;
     byOffset.set(entryOffset, entry);
