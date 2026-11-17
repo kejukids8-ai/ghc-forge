@@ -43,6 +43,16 @@ function repoJson(store: Store, repo: Repo): Record<string, unknown> {
 }
 
 function issueJson(issue: Issue): Record<string, unknown> {
+  const cached = issueJsonCache.get(issue);
+  if (cached) return cached;
+  const built = buildIssueJson(issue);
+  if (issueJsonCache.size < 4096) issueJsonCache.set(issue, built);
+  return built;
+}
+
+const issueJsonCache = new WeakMap<Issue, Record<string, unknown>>();
+
+function buildIssueJson(issue: Issue): Record<string, unknown> {
   return {
     id: issue.id,
     node_id: `I_${issue.id}`,

@@ -34,6 +34,17 @@ interface Ctx {
 }
 
 function advertisement(repo: Repo, service: string): Buffer {
+  // v0 ref advertisement with capabilities on the first line (cached per repo state + service)
+  const cache = cacheOf(repo);
+  const cacheKey = `adv|${service}`;
+  const hit = cache.lsRefs.get(cacheKey);
+  if (hit) return hit;
+  const built = buildAdvertisement(repo, service);
+  if (cache.lsRefs.size < 64) cache.lsRefs.set(cacheKey, built);
+  return built;
+}
+
+function buildAdvertisement(repo: Repo, service: string): Buffer {
   // v0 ref advertisement with capabilities on the first line
   const caps = service === SERVICE_RECEIVE
     ? 'report-status report-status-v2 side-band-64k delete-refs ofs-delta shallow'
