@@ -37,6 +37,12 @@ function retryDelay(attempt: number): number {
   return Math.min(RETRY_MAX_MS, RETRY_INITIAL_MS * 2 ** Math.min(attempt, 8));
 }
 
+/** One lifecycle call to the env: fetch with the shared timeout, answer text on contract errors. */
+async function envCall(path: string, init?: RequestInit): Promise<{ status: number; ok: boolean; text: string }> {
+  const res = await fetch(`${ENV_URL}${path}`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS), ...init });
+  return { status: res.status, ok: res.ok, text: await res.text() };
+}
+
 /**
  * POST the bound port until the env accepts it. 200 is the normal answer; 409 means a first register
  * already won, which is not this process's to fix. 400 and 405 are contract errors and end the program;
@@ -45,14 +51,13 @@ function retryDelay(attempt: number): number {
 async function register(port: number): Promise<void> {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      const res = await fetch(`${ENV_URL}/register`, {
+      const call = await envCall('/register', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ port }),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
-      if (res.status === 200 || res.status === 409) return;
-      if (res.status === 400 || res.status === 405) throw new Error(`register answered HTTP ${res.status}: ${await res.text()}`);
+      if (call.status === 200 || call.status === 409) return;
+      if (call.status === 400 || call.status === 405) throw new Error(`register answered HTTP ${call.status}: ${call.text}`);
     } catch (err) {
       if (err instanceof Error && err.message.startsWith('register answered HTTP ')) throw err;
     }
@@ -64,9 +69,9 @@ async function register(port: number): Promise<void> {
 async function waitForDone(): Promise<void> {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      const res = await fetch(`${ENV_URL}/done`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
-      if (res.ok) {
-        const body = (await res.json()) as { done?: unknown };
+      const call = await envCall('/done');
+      if (call.ok) {
+        const body = JSON.parse(call.text) as { done?: unknown };
         if (body.done === true) return;
       }
     } catch {
