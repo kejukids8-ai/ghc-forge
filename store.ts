@@ -45,6 +45,10 @@ export interface Pull {
 }
 
 export interface Repo {
+  /** Memoized parseCommit results by commit oid (commits are immutable once stored). */
+  parsedCommits: Map<string, { tree: string; parents: string[] }>;
+  /** Bumped on every ref/object mutation; keys any per-repo response cache. */
+  stateVersion: number;
   id: number;
   owner: string;
   name: string;
@@ -87,6 +91,8 @@ export class Store {
       description,
       privateFlag,
       defaultBranch: 'main',
+      parsedCommits: new Map(),
+      stateVersion: 0,
       objects: new Map(),
       refs: new Map(),
       labels: new Map(),
@@ -106,10 +112,24 @@ export class Store {
     return found ?? null;
   }
 
-  putObject(repo: Repo, type: GitObjectType, data: Buffer): string {
-    const oid = hashObject(type, data);
-    if (!repo.objects.has(oid)) repo.objects.set(oid, { type, data });
-    return oid;
+  putObject(repo: Repo, type: GitObjectType, data: Buffer, oid?: string): string {
+    const id = oid ?? hashObject(type, data);
+    if (!repo.objects.has(id)) {
+      repo.objects.set(id, { type, data });
+      repo.stateVersion += 1;
+    }
+    return id;
+  }
+
+  /** parseCommit with a per-repo memo: commits never change once stored. */
+  parseCommitCached(repo: Repo, oid: string): { tree: string; parents: string[] } | null {
+    const memo = repo.parsedCommits.get(oid);
+    if (memo) return memo;
+    const object = repo.objects.get(oid);
+    if (!object || object.type !== 'commit') return null;
+    const parsed = parseCommit(object.data);
+    repo.parsedCommits.set(oid, parsed);
+    return parsed;
   }
 
   /** Fast-forward guard: is `newOid` a descendant of `oldOid`? Unknown oldOid (unborn) is allowed.
@@ -127,7 +147,8 @@ export class Store {
       const object = repo.objects.get(oid);
       if (!object || object.type !== 'commit') continue;
       seen.add(oid);
-      for (const parent of parseCommit(object.data).parents) stack.push(parent);
+      const parsed = this.parseCommitCached(repo, oid);
+      if (parsed) for (const parent of parsed.parents) stack.push(parent);
     }
     return false;
   }
@@ -152,6 +173,7 @@ export class Store {
       'utf8',
     );
     const sha = this.putObject(repo, 'commit', commitData);
+    repo.stateVersion += 1;
     repo.refs.set(`refs/heads/${pull.base}`, sha);
     pull.state = 'closed';
     pull.merged = true;

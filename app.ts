@@ -86,7 +86,9 @@ function sendEmpty(res: ServerResponse, status: number, headers: Readonly<Record
 /** Build the server. It binds nothing until the caller listens; the entry listens on an ephemeral port. */
 export function createApp(): Server {
   return createServer(async (req: IncomingMessage, res: ServerResponse) => {
-    const path = pathOf(req);
+    const rawUrl = req.url ?? '/';
+    const queryIndex = rawUrl.indexOf('?');
+    const path = queryIndex === -1 ? rawUrl : rawUrl.slice(0, queryIndex);
     const method = req.method ?? 'GET';
     const headers: Record<string, string> = { 'x-github-request-id': requestId() };
     const origin = `http://${req.headers.host ?? 'localhost'}`;
@@ -128,7 +130,7 @@ export function createApp(): Server {
           segments[0] ?? '',
           (segments[1] ?? '').replace(/\.git$/, ''),
           gitPath,
-          new URL(req.url ?? '/', 'http://entry').searchParams,
+          new URL(rawUrl, 'http://entry').searchParams,
           req.headers['git-protocol'] as string | undefined,
         );
         return;
@@ -143,7 +145,7 @@ export function createApp(): Server {
           { ...deps, respondRaw: (status: number, contentType: string, body: Buffer | string, extra?: Record<string, string>) => sendRaw(res, status, body, { 'content-type': contentType, ...headers, ...(extra ?? {}) }) },
           method,
           segments,
-          new URL(req.url ?? '/', 'http://entry').searchParams,
+          new URL(rawUrl, 'http://entry').searchParams,
         );
         if (handled) return;
       }

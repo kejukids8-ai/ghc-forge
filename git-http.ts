@@ -9,6 +9,22 @@ import type { Store, Repo, GitObject } from './store.ts';
 const SERVICE_UPLOAD = 'git-upload-pack';
 const SERVICE_RECEIVE = 'git-receive-pack';
 
+/** Per-repo response caches: upload-pack answers are pure functions of (request, repo state). */
+interface RepoCache {
+  version: number;
+  v2Fetch: Map<string, Buffer>;
+  lsRefs: Map<string, Buffer>;
+}
+const repoCaches = new WeakMap<Repo, RepoCache>();
+function cacheOf(repo: Repo): RepoCache {
+  let cache = repoCaches.get(repo);
+  if (!cache || cache.version !== repo.stateVersion) {
+    cache = { version: repo.stateVersion, v2Fetch: new Map(), lsRefs: new Map() };
+    repoCaches.set(repo, cache);
+  }
+  return cache;
+}
+
 interface Ctx {
   store: Store;
   token: string | undefined;
@@ -96,6 +112,16 @@ function parseLsRefsRequest(packets: ReturnType<typeof decodePktLines>): LsRefsR
 }
 
 function lsRefsResponse(repo: Repo, request: LsRefsRequest): Buffer {
+  const key = `${repo.stateVersion}|${request.peel}|${request.symrefs}|${request.unborn}|${request.prefixes.join(',')}`;
+  const cache = cacheOf(repo);
+  const hit = cache.lsRefs.get(key);
+  if (hit) return hit;
+  const built = buildLsRefsResponse(repo, request);
+  if (cache.lsRefs.size < 64) cache.lsRefs.set(key, built);
+  return built;
+}
+
+function buildLsRefsResponse(repo: Repo, request: LsRefsRequest): Buffer {
   const lines: string[] = [];
   const keep = (name: string): boolean => request.prefixes.length === 0 || request.prefixes.some((prefix) => name.startsWith(prefix));
   const headTarget = `refs/heads/${repo.defaultBranch}`;
@@ -260,6 +286,16 @@ function fetchPack(repo: Repo, request: FetchRequestV2): { pack: Buffer; shallow
 }
 
 function v2FetchResponse(repo: Repo, request: FetchRequestV2): Buffer {
+  const key = `${repo.stateVersion}|w:${request.wants.join(',')}|h:${request.haves.join(',')}|d:${request.depth}`;
+  const cache = cacheOf(repo);
+  const hit = cache.v2Fetch.get(key);
+  if (hit) return hit;
+  const built = buildV2FetchResponse(repo, request);
+  if (cache.v2Fetch.size < 64) cache.v2Fetch.set(key, built);
+  return built;
+}
+
+function buildV2FetchResponse(repo: Repo, request: FetchRequestV2): Buffer {
   const result = fetchPack(repo, request);
   const sections: Buffer[] = [];
   const ackLines: string[] = [];
@@ -406,7 +442,7 @@ function receivePackResponse(repo: Repo, body: Buffer, store: Store): Buffer {
     try {
       const read = readPackObjects(packBytes);
       for (const [oid, object] of read.objects) {
-        store.putObject(repo, object.type, object.data);
+        store.putObject(repo, object.type, object.data, oid);
         received.set(oid, object);
       }
     } catch (err) {
@@ -421,6 +457,7 @@ function receivePackResponse(repo: Repo, body: Buffer, store: Store): Buffer {
     for (const command of commands) {
       if (command.newOid === ZERO_OID) {
         repo.refs.delete(command.ref);
+        repo.stateVersion += 1;
         reportLines.push(`ok ${command.ref}\n`);
         continue;
       }
@@ -433,6 +470,7 @@ function receivePackResponse(repo: Repo, body: Buffer, store: Store): Buffer {
         continue;
       }
       repo.refs.set(command.ref, command.newOid);
+      repo.stateVersion += 1;
       reportLines.push(`ok ${command.ref}\n`);
     }
   } else {
@@ -441,9 +479,7 @@ function receivePackResponse(repo: Repo, body: Buffer, store: Store): Buffer {
 
   const sideband = capabilities.includes('side-band-64k');
   // report-status (v1 format) is fine for both report-status and report-status-v2 requests here
-  let report = encodePktLines([`unpack ${unpackDetail}\n`, ...reportLines]);
-  if (unpackOk) report = encodePktLines([`unpack ok\n`, ...reportLines]);
-  report = encodePktLines([`${unpackOk ? 'unpack ok' : `unpack ${unpackDetail}`}\n`, ...reportLines]);
+  const report = encodePktLines([`${unpackOk ? 'unpack ok' : `unpack ${unpackDetail}`}\n`, ...reportLines]);
 
   if (sideband) {
     const parts: Buffer[] = [];
