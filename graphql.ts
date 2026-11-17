@@ -2,6 +2,7 @@
 // suite's documents read (gh + github-mcp-server shapes), with introspection via __type.
 import type { Store, Repo, Issue, Pull } from './store.ts';
 import { parseCommit, parseTree } from './git-core.ts';
+import { invalidateIssueJson } from './rest.ts';
 
 export interface GqlCtx {
   store: Store;
@@ -608,6 +609,7 @@ function mutationField(ctx: GqlCtx, field: string, args: Readonly<Record<string,
       if (issue) {
         issue.state = 'closed';
         issue.closedAt = issue.createdAt;
+        invalidateIssueJson(issue);
         return respond({ issue: { __kind: 'Issue', ...issueObject(issue) } });
       }
     }
@@ -644,6 +646,7 @@ function mutationField(ctx: GqlCtx, field: string, args: Readonly<Record<string,
       if (issue) {
         const comment = { id: ++repo.commentCounter, body, createdAt: issue.createdAt };
         issue.comments.push(comment);
+        invalidateIssueJson(issue);
         return respond({ commentEdge: { node: { __kind: 'Comment', id: globalId('issue-comment', comment.id), body } } });
       }
     }

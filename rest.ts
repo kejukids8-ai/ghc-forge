@@ -52,6 +52,24 @@ function issueJson(issue: Issue): Record<string, unknown> {
 
 const issueJsonCache = new WeakMap<Issue, Record<string, unknown>>();
 
+/** Serialized-issue-body cache: GET /issues/{n} sends this text straight to the socket. */
+const issueTextCache = new WeakMap<Issue, string>();
+
+/** Drop an issue's cached JSON (object + serialized text) after any mutation to it. */
+export function invalidateIssueJson(issue: Issue): void {
+  issueJsonCache.delete(issue);
+  issueTextCache.delete(issue);
+}
+
+/** The GET /issues/{number} response text, memoized per issue until invalidated. */
+function issueText(issue: Issue): string {
+  const cached = issueTextCache.get(issue);
+  if (cached !== undefined) return cached;
+  const text = `${JSON.stringify(issueJson(issue))}\n`;
+  issueTextCache.set(issue, text);
+  return text;
+}
+
 function buildIssueJson(issue: Issue): Record<string, unknown> {
   return {
     id: issue.id,
@@ -667,7 +685,7 @@ export function handleRest(ctx: Ctx, method: string, segments: readonly string[]
     }
     if (rest.length === 2) {
       if (method === 'GET') {
-        ctx.respondJson(200, issueJson(issue));
+        ctx.respondRaw(200, 'application/json; charset=utf-8', issueText(issue));
         return true;
       }
       if (method === 'PATCH') {
@@ -680,6 +698,7 @@ export function handleRest(ctx: Ctx, method: string, segments: readonly string[]
               issue.state = parsed.state;
               issue.closedAt = parsed.state === 'closed' ? issue.createdAt : null;
             }
+            invalidateIssueJson(issue);
             ctx.respondJson(200, issueJson(issue));
           } catch {
             ctx.respondJson(400, errorBody('Problems parsing JSON'));
@@ -702,6 +721,7 @@ export function handleRest(ctx: Ctx, method: string, segments: readonly string[]
             const commentBody = typeof parsed.body === 'string' ? parsed.body : '';
             const comment = { id: ++repo.commentCounter, body: commentBody, createdAt: issue.createdAt };
             issue.comments.push(comment);
+            invalidateIssueJson(issue);
             ctx.respondJson(201, { id: comment.id, node_id: '', body: comment.body, user: { login: issue.user }, created_at: comment.createdAt });
           } catch {
             ctx.respondJson(400, errorBody('Problems parsing JSON'));

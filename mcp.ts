@@ -3,6 +3,7 @@
 // get_me, list_issues, get_issue, create_issue, close_issue, list_pull_requests, get_pull_request,
 // create_pull_request, merge_pull_request, get_file_contents, list_commits, create_repository.
 import { parseCommit, parseTree } from './git-core.ts';
+import { invalidateIssueJson } from './rest.ts';
 import { handleGraphQL } from './graphql.ts';
 import type { Store, Repo, Issue, Pull } from './store.ts';
 
@@ -308,6 +309,7 @@ function callTool(ctx: McpCtx, name: string, args: Record<string, unknown>): unk
       if (!issue) return errorContent('issue not found');
       issue.state = 'closed';
       issue.closedAt = issue.createdAt;
+      invalidateIssueJson(issue);
       return textContent(JSON.stringify(issuePayload(issue)));
     }
     case 'list_pull_requests': {
