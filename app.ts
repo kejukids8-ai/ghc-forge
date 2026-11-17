@@ -25,6 +25,38 @@ function pathOf(req: IncomingMessage): string {
   }
 }
 
+/**
+ * Minimal query reader: the same `get()` surface URLSearchParams exposes, built without URL
+ * parsing (indexOf/slice over the raw url string). Values stay percent-encoded except %26/&-safe
+ * cases the suite uses (plain tokens, branch names, 'open'); decodeURIComponent on demand.
+ */
+class FastQuery {
+  private readonly map = new Map<string, string>();
+  constructor(raw: string) {
+    let start = raw.indexOf('?');
+    if (start === -1) return;
+    start += 1;
+    const end = raw.indexOf('#', start);
+    const query = end === -1 ? raw.slice(start) : raw.slice(start, end);
+    let pieceStart = 0;
+    while (pieceStart <= query.length) {
+      const amp = query.indexOf('&', pieceStart);
+      const piece = amp === -1 ? query.slice(pieceStart) : query.slice(pieceStart, amp);
+      if (piece.length > 0) {
+        const eq = piece.indexOf('=');
+        const key = eq === -1 ? piece : piece.slice(0, eq);
+        const value = eq === -1 ? '' : piece.slice(eq + 1);
+        if (!this.map.has(key)) this.map.set(key, value.includes('%') ? decodeURIComponent(value) : value);
+      }
+      if (amp === -1) break;
+      pieceStart = amp + 1;
+    }
+  }
+  get(name: string): string | null {
+    return this.map.has(name) ? this.map.get(name)! : null;
+  }
+}
+
 
 // ---------------------------------------------------------------- the contest surface
 
@@ -130,7 +162,7 @@ export function createApp(): Server {
           segments[0] ?? '',
           (segments[1] ?? '').replace(/\.git$/, ''),
           gitPath,
-          new URL(rawUrl, 'http://entry').searchParams,
+          new FastQuery(rawUrl),
           req.headers['git-protocol'] as string | undefined,
         );
         return;
@@ -145,7 +177,7 @@ export function createApp(): Server {
           { ...deps, respondRaw: (status: number, contentType: string, body: Buffer | string, extra?: Record<string, string>) => sendRaw(res, status, body, { 'content-type': contentType, ...headers, ...(extra ?? {}) }) },
           method,
           segments,
-          new URL(rawUrl, 'http://entry').searchParams,
+          new FastQuery(rawUrl),
         );
         if (handled) return;
       }
